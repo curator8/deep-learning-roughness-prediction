@@ -1,9 +1,56 @@
-# Texture Prediction Portfolio
+# Deep Learning Roughness Prediction
 
-This folder contains two parts:
+CNN-based pipeline for predicting PBR roughness maps from albedo textures, with ablation studies, quantitative metrics, and a Three.js comparison viewer.
 
-- Python training/export code for albedo-to-roughness prediction
-- A Three.js viewer for comparing the original and predicted roughness maps
+This project treats material-map generation as an image-to-image regression task:
+
+- input: `albedo.png`
+- target: `roughness.png`
+- models: U-Net with skip connections and a no-skip autoencoder baseline
+- outputs: saved metrics, model checkpoints, exported texture maps, and an interactive browser viewer
+
+The repository contains two main parts:
+
+- Python code for dataset loading, training, ablations, metric reporting, and texture export
+- A Three.js app for comparing the original and predicted roughness maps on a mesh
+
+## Example Results
+
+The pipeline exports:
+
+- `outputs/ablation_results.json` with final metrics
+- `outputs/prediction_preview.png` with side-by-side albedo, target roughness, and predicted roughness
+- `simple-textured-mesh/static/predictions/` assets for browser-based comparison
+
+The default exported sample is `dirt_01`.
+
+## Tech Stack
+
+- Python
+- PyTorch
+- NumPy
+- Pillow
+- Matplotlib
+- Jupyter Notebook
+- Three.js
+- Vite
+- JavaScript
+- Git
+
+## Ablation Summary
+
+Current training-set ablation after 20 epochs:
+
+| Model | MAE | RMSE | Cosine Similarity |
+|---|---:|---:|---:|
+| U-Net with skip connections | 0.0891 | 0.1130 | 0.9978 |
+| Autoencoder without skips | 0.1431 | 0.1630 | 0.9982 |
+
+Interpretation:
+
+- The U-Net achieves lower `MAE` and `RMSE`, so it fits the roughness targets more accurately.
+- The autoencoder baseline performs worse on direct reconstruction error.
+- This ablation supports the claim that skip connections help preserve useful spatial detail for this image-to-image regression task.
 
 ## Folder Structure
 

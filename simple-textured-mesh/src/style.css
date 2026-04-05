@@ -1,0 +1,108 @@
+*
+{
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+html,
+body
+{
+    overflow: hidden;
+    font-family: Arial, sans-serif;
+    background: #111;
+}
+
+.webgl
+{
+    position: fixed;
+    top: 0;
+    left: 0;
+    outline: none;
+}
+
+.texture-ui
+{
+    position: fixed;
+    top: 1.5rem;
+    left: 1.5rem;
+    z-index: 10;
+    width: min(24rem, calc(100vw - 3rem));
+}
+
+.texture-ui__card
+{
+    padding: 1rem;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: 1rem;
+    background: rgba(20, 24, 30, 0.82);
+    color: #f4f6f8;
+    backdrop-filter: blur(12px);
+}
+
+.texture-ui__eyebrow
+{
+    margin-bottom: 0.35rem;
+    font-size: 0.72rem;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: #8fb3c9;
+}
+
+.texture-ui__title
+{
+    margin-bottom: 0.5rem;
+    font-size: 1.4rem;
+}
+
+.texture-ui__copy
+{
+    margin-bottom: 1rem;
+    line-height: 1.45;
+    color: #d1d7dd;
+}
+
+.texture-ui__actions
+{
+    display: flex;
+    gap: 0.75rem;
+    flex-wrap: wrap;
+    margin-bottom: 0.85rem;
+}
+
+.texture-ui__button
+{
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.06);
+    color: #f4f6f8;
+    padding: 0.7rem 1rem;
+    cursor: pointer;
+    transition: background 0.2s ease, border-color 0.2s ease, opacity 0.2s ease;
+}
+
+.texture-ui__button:hover:not(:disabled)
+{
+    background: rgba(255, 255, 255, 0.12);
+    border-color: rgba(255, 255, 255, 0.24);
+}
+
+.texture-ui__button:disabled
+{
+    opacity: 0.45;
+    cursor: not-allowed;
+}
+
+.texture-ui__button--primary,
+.texture-ui__button.is-active
+{
+    background: #c97032;
+    border-color: #c97032;
+    color: #fff7f0;
+}
+
+.texture-ui__status
+{
+    font-size: 0.92rem;
+    color: #b8c2cc;
+}

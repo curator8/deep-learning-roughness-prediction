@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+
+# PyTorch / generated outputs
+outputs/*.pth
+
+# Frontend build artifacts
+simple-textured-mesh/node_modules/
+simple-textured-mesh/dist/
+
+# OS / editor
+.DS_Store
+Thumbs.db

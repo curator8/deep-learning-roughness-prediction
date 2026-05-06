@@ -1,0 +1,21 @@
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    environment:
+      MODEL_CHECKPOINT: /app/outputs/unet_skip_connections.pth
+      IMAGE_SIZE: "256"
+    expose:
+      - "8000"
+
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+      args:
+        VITE_API_BASE_URL: /api
+    ports:
+      - "8080:80"
+    depends_on:
+      - backend

@@ -1,18 +1,24 @@
 {
   "unet_skip_connections": {
-    "mae": 0.08911760151386261,
-    "mse": 0.012767389416694641,
-    "rmse": 0.11299287330046369,
-    "cosine_similarity": 0.9978499412536621,
-    "train_mae": 0.09593154489994049,
-    "epoch": 20
+    "train_loss": 0.011801943890750408,
+    "train_mae": 0.10968226552009583,
+    "train_rmse": 0.13369014898228668,
+    "train_cosine_similarity": 0.9976583337783813,
+    "test_mae": 0.10266478856404622,
+    "test_rmse": 0.12306307882760828,
+    "test_cosine_similarity": 0.998718778292338,
+    "learning_rate": 0.0003,
+    "epoch": 40
   },
   "autoencoder_no_skips": {
-    "mae": 0.14307138696312904,
-    "mse": 0.026560230180621147,
-    "rmse": 0.16297309649332048,
-    "cosine_similarity": 0.998203456401825,
-    "train_mae": 0.14282456040382385,
-    "epoch": 20
+    "train_loss": 0.012902990281581879,
+    "train_mae": 0.13377082586288452,
+    "train_rmse": 0.16632711158468796,
+    "train_cosine_similarity": 0.9972834300994873,
+    "test_mae": 0.09547912081082661,
+    "test_rmse": 0.11001336195827348,
+    "test_cosine_similarity": 0.9990623792012533,
+    "learning_rate": 0.0003,
+    "epoch": 35
   }
 }

@@ -1,0 +1,12 @@
+.git
+.agents
+.codex
+__pycache__
+*.py[cod]
+.ipynb_checkpoints
+
+simple-textured-mesh/node_modules
+simple-textured-mesh/dist
+
+.DS_Store
+Thumbs.db

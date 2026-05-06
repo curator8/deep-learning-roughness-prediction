@@ -13,9 +13,16 @@ from torchvision.transforms.functional import InterpolationMode
 class PairedTextureDataset(Dataset):
     """Loads texture folders that contain albedo.png and roughness.png."""
 
-    def __init__(self, root_dir, image_size=(256, 256), random_horizontal_flip=False):
+    def __init__(
+        self,
+        root_dir,
+        image_size=(256, 256),
+        augment=False,
+        random_horizontal_flip=False,
+    ):
         self.root_dir = Path(root_dir)
         self.image_size = image_size
+        self.augment = augment
         self.random_horizontal_flip = random_horizontal_flip
 
         self.samples = []
@@ -46,19 +53,22 @@ class PairedTextureDataset(Dataset):
         albedo = Image.open(sample["albedo_path"]).convert("RGB")
         roughness = Image.open(sample["roughness_path"])
 
-        albedo = TF.resize(
-            albedo,
-            self.image_size,
-            interpolation=InterpolationMode.BILINEAR,
-            antialias=True,
-        )
-
-        if self.random_horizontal_flip and random.random() < 0.5:
-            albedo = TF.hflip(albedo)
-            roughness = TF.hflip(roughness)
+        albedo, roughness = self._transform_pair(albedo, roughness)
 
         albedo_tensor = TF.to_tensor(albedo)
-        roughness_array = np.array(roughness, dtype=np.float32)
+        roughness_tensor = self._roughness_to_tensor(roughness)
+
+        return albedo_tensor, roughness_tensor
+
+    def _roughness_to_tensor(self, roughness):
+        roughness_array = np.array(roughness)
+
+        if roughness_array.ndim == 3:
+            # Some downloaded roughness maps are stored as RGB/RGBA even though the
+            # channels represent one grayscale map. Use one channel to keep [1,H,W].
+            roughness_array = roughness_array[..., 0]
+
+        roughness_array = roughness_array.astype(np.float32)
         roughness_tensor = torch.from_numpy(roughness_array).unsqueeze(0)
 
         # Preserve 16-bit grayscale maps instead of forcing them through 8-bit PIL conversion.
@@ -67,14 +77,77 @@ class PairedTextureDataset(Dataset):
         else:
             roughness_tensor = roughness_tensor / 255.0
 
-        roughness_tensor = TF.resize(
+        return TF.resize(
             roughness_tensor,
             self.image_size,
             interpolation=InterpolationMode.BILINEAR,
             antialias=True,
         )
 
-        return albedo_tensor, roughness_tensor
+    def _transform_pair(self, albedo, roughness):
+        if self.augment:
+            albedo, roughness = self._random_resized_crop_pair(albedo, roughness)
+
+            if random.random() < 0.5:
+                albedo = TF.hflip(albedo)
+                roughness = TF.hflip(roughness)
+            if random.random() < 0.5:
+                albedo = TF.vflip(albedo)
+                roughness = TF.vflip(roughness)
+
+            rotations = random.randint(0, 3)
+            if rotations:
+                angle = rotations * 90
+                albedo = TF.rotate(albedo, angle)
+                roughness = TF.rotate(roughness, angle)
+
+            albedo = TF.adjust_brightness(albedo, random.uniform(0.9, 1.1))
+            albedo = TF.adjust_contrast(albedo, random.uniform(0.9, 1.1))
+            albedo = TF.adjust_saturation(albedo, random.uniform(0.95, 1.05))
+        else:
+            albedo = TF.resize(
+                albedo,
+                self.image_size,
+                interpolation=InterpolationMode.BILINEAR,
+                antialias=True,
+            )
+
+        if self.random_horizontal_flip and random.random() < 0.5:
+            albedo = TF.hflip(albedo)
+            roughness = TF.hflip(roughness)
+
+        return albedo, roughness
+
+    def _random_resized_crop_pair(self, albedo, roughness):
+        width, height = albedo.size
+        scale = random.uniform(0.65, 1.0)
+        crop_width = max(1, int(width * scale))
+        crop_height = max(1, int(height * scale))
+        left = random.randint(0, width - crop_width)
+        top = random.randint(0, height - crop_height)
+
+        albedo = TF.resized_crop(
+            albedo,
+            top,
+            left,
+            crop_height,
+            crop_width,
+            self.image_size,
+            interpolation=InterpolationMode.BILINEAR,
+            antialias=True,
+        )
+        roughness = TF.resized_crop(
+            roughness,
+            top,
+            left,
+            crop_height,
+            crop_width,
+            self.image_size,
+            interpolation=InterpolationMode.BILINEAR,
+            antialias=True,
+        )
+
+        return albedo, roughness
 
     def sample_name(self, index):
         return self.samples[index]["name"]

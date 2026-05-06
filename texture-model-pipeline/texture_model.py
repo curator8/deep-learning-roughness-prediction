@@ -1,6 +1,5 @@
 import torch
 from torch import nn
-import matplotlib.pyplot as plt
 
 
 class ConvBlock(nn.Module):
@@ -118,24 +117,85 @@ class RoughnessAutoencoder(nn.Module):
         return torch.sigmoid(self.output_layer(x))
 
 
-def train_one_epoch(model, dataloader, optimizer, device):
+def predict_tiled_center(model, input_tensor, tile_repeat=3):
+    """Predict with wrapped context and crop the center tile.
+
+    This reduces visible seams when the output roughness map is repeated as a
+    texture because the model sees opposite image edges next to each other.
+    """
+    if tile_repeat < 3 or tile_repeat % 2 == 0:
+        raise ValueError("tile_repeat must be an odd integer greater than or equal to 3")
+
+    _, _, height, width = input_tensor.shape
+    center_index = tile_repeat // 2
+    tiled_input = input_tensor.repeat(1, 1, tile_repeat, tile_repeat)
+    tiled_prediction = model(tiled_input)
+
+    top = center_index * height
+    left = center_index * width
+    return tiled_prediction[:, :, top:top + height, left:left + width]
+
+
+def blend_seams(roughness_tensor, feather=24):
+    """Blend opposite texture edges so repeated roughness maps tile cleanly."""
+    _, _, height, width = roughness_tensor.shape
+    feather = min(feather, height // 2, width // 2)
+    if feather <= 0:
+        return roughness_tensor
+
+    blended = roughness_tensor.clone()
+    weights = torch.linspace(
+        0.0,
+        1.0,
+        feather,
+        device=roughness_tensor.device,
+        dtype=roughness_tensor.dtype,
+    ).view(1, 1, 1, feather)
+
+    left_band = roughness_tensor[:, :, :, :feather]
+    right_band = torch.flip(roughness_tensor[:, :, :, -feather:], dims=[3])
+    seam_band = left_band * weights + right_band * (1.0 - weights)
+    blended[:, :, :, :feather] = seam_band
+    blended[:, :, :, -feather:] = torch.flip(seam_band, dims=[3])
+
+    weights = weights.transpose(2, 3)
+    top_band = blended[:, :, :feather, :]
+    bottom_band = torch.flip(blended[:, :, -feather:, :], dims=[2])
+    seam_band = top_band * weights + bottom_band * (1.0 - weights)
+    blended[:, :, :feather, :] = seam_band
+    blended[:, :, -feather:, :] = torch.flip(seam_band, dims=[2])
+
+    return blended
+
+
+def predict_seamless_roughness(model, input_tensor, tile_repeat=3, feather=24):
+    prediction = predict_tiled_center(model, input_tensor, tile_repeat=tile_repeat)
+    return blend_seams(prediction, feather=feather)
+
+
+def train_one_epoch(model, dataloader, optimizer, device, max_grad_norm=1.0):
     model.train()
     running_loss = 0.0
+    sample_count = 0
 
     for albedo_batch, roughness_batch in dataloader:
         albedo_batch = albedo_batch.to(device)
         roughness_batch = roughness_batch.to(device)
 
         predicted_roughness = model(albedo_batch)
-        loss = torch.nn.functional.l1_loss(predicted_roughness, roughness_batch)
+        loss = torch.nn.functional.smooth_l1_loss(predicted_roughness, roughness_batch)
 
         optimizer.zero_grad()
         loss.backward()
+        if max_grad_norm is not None:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
         optimizer.step()
 
-        running_loss += loss.item()
+        batch_size = albedo_batch.size(0)
+        running_loss += loss.item() * batch_size
+        sample_count += batch_size
 
-    return running_loss / len(dataloader)
+    return running_loss / sample_count
 
 
 @torch.no_grad()
@@ -145,7 +205,7 @@ def evaluate_model(model, dataloader, device):
     total_mae = 0.0
     total_mse = 0.0
     total_cosine = 0.0
-    total_batches = 0
+    total_samples = 0
 
     for albedo_batch, roughness_batch in dataloader:
         albedo_batch = albedo_batch.to(device)
@@ -160,37 +220,79 @@ def evaluate_model(model, dataloader, device):
         target_flat = roughness_batch.flatten(start_dim=1)
         cosine = torch.nn.functional.cosine_similarity(pred_flat, target_flat, dim=1).mean()
 
-        total_mae += mae.item()
-        total_mse += mse.item()
-        total_cosine += cosine.item()
-        total_batches += 1
+        batch_size = albedo_batch.size(0)
+        total_mae += mae.item() * batch_size
+        total_mse += mse.item() * batch_size
+        total_cosine += cosine.item() * batch_size
+        total_samples += batch_size
 
-    average_mae = total_mae / total_batches
-    average_mse = total_mse / total_batches
+    average_mae = total_mae / total_samples
+    average_mse = total_mse / total_samples
 
     return {
         "mae": average_mae,
         "mse": average_mse,
         "rmse": average_mse ** 0.5,
-        "cosine_similarity": total_cosine / total_batches,
+        "cosine_similarity": total_cosine / total_samples,
     }
 
 
-def fit_model(model, dataloader, optimizer, device, epochs):
+def fit_model(
+    model,
+    train_dataloader,
+    eval_dataloader,
+    optimizer,
+    device,
+    epochs,
+    scheduler=None,
+    train_eval_dataloader=None,
+    epoch_callback=None,
+):
     history = []
+    best_state = None
+    best_mae = float("inf")
+    train_eval_dataloader = train_eval_dataloader or train_dataloader
 
     for epoch in range(epochs):
-        train_mae = train_one_epoch(model, dataloader, optimizer, device)
-        metrics = evaluate_model(model, dataloader, device)
-        metrics["train_mae"] = train_mae
+        train_loss = train_one_epoch(model, train_dataloader, optimizer, device)
+        train_metrics = evaluate_model(model, train_eval_dataloader, device)
+        eval_metrics = evaluate_model(model, eval_dataloader, device)
+
+        if scheduler is not None:
+            scheduler.step(eval_metrics["mae"])
+
+        if eval_metrics["mae"] < best_mae:
+            best_mae = eval_metrics["mae"]
+            best_state = {
+                key: value.detach().cpu().clone()
+                for key, value in model.state_dict().items()
+            }
+
+        metrics = {
+            "train_loss": train_loss,
+            "train_mae": train_metrics["mae"],
+            "train_rmse": train_metrics["rmse"],
+            "train_cosine_similarity": train_metrics["cosine_similarity"],
+            "test_mae": eval_metrics["mae"],
+            "test_rmse": eval_metrics["rmse"],
+            "test_cosine_similarity": eval_metrics["cosine_similarity"],
+            "learning_rate": optimizer.param_groups[0]["lr"],
+        }
         metrics["epoch"] = epoch + 1
         history.append(metrics)
+        if epoch_callback is not None:
+            epoch_callback(metrics)
+
+    if best_state is not None:
+        model.load_state_dict(best_state)
 
     return history
 
 
 @torch.no_grad()
 def show_prediction(model, dataset, index=0, device="cpu"):
+    import matplotlib.pyplot as plt
+
     model.eval()
 
     albedo_tensor, target_roughness = dataset[index]

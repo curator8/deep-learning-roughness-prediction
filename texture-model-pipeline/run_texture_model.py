@@ -19,6 +19,7 @@ from texture_model import (
     RoughnessAutoencoder,
     RoughnessUNet,
     fit_model,
+    predict_seamless_roughness,
 )
 
 
@@ -60,7 +61,10 @@ def export_prediction_artifacts(
     model.eval()
 
     albedo_tensor, target_roughness = dataset[sample_index]
-    predicted_roughness = model(albedo_tensor.unsqueeze(0).to(device)).squeeze(0).cpu()
+    predicted_roughness = predict_seamless_roughness(
+        model,
+        albedo_tensor.unsqueeze(0).to(device),
+    ).squeeze(0).cpu()
 
     save_albedo_png(albedo_tensor, albedo_output_path)
     save_roughness_png(target_roughness, target_output_path)
@@ -89,24 +93,51 @@ def export_prediction_artifacts(
 def run_experiment(
     model_name: str,
     model_class,
-    dataloader: DataLoader,
+    train_dataloader: DataLoader,
+    train_eval_dataloader: DataLoader,
+    test_dataloader: DataLoader,
     device: str,
     epochs: int,
     learning_rate: float,
+    weight_decay: float,
 ) -> tuple[torch.nn.Module, list[dict[str, float]]]:
     model = model_class().to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
-    history = fit_model(model, dataloader, optimizer, device, epochs=epochs)
+    optimizer = torch.optim.AdamW(
+        model.parameters(),
+        lr=learning_rate,
+        weight_decay=weight_decay,
+    )
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer,
+        mode="min",
+        factor=0.5,
+        patience=8,
+    )
+    print(f"\nRunning experiment: {model_name}", flush=True)
 
-    print(f"\nRunning experiment: {model_name}")
-    for row in history:
+    def print_epoch(row: dict[str, float]) -> None:
         print(
             f"Epoch {row['epoch']}/{epochs} - "
+            f"train_loss={row['train_loss']:.6f}, "
             f"train_mae={row['train_mae']:.6f}, "
-            f"mae={row['mae']:.6f}, "
-            f"rmse={row['rmse']:.6f}, "
-            f"cosine_similarity={row['cosine_similarity']:.6f}"
+            f"test_mae={row['test_mae']:.6f}, "
+            f"test_rmse={row['test_rmse']:.6f}, "
+            f"test_cosine_similarity={row['test_cosine_similarity']:.6f}, "
+            f"lr={row['learning_rate']:.2e}",
+            flush=True,
         )
+
+    history = fit_model(
+        model=model,
+        train_dataloader=train_dataloader,
+        train_eval_dataloader=train_eval_dataloader,
+        eval_dataloader=test_dataloader,
+        optimizer=optimizer,
+        device=device,
+        epochs=epochs,
+        scheduler=scheduler,
+        epoch_callback=print_epoch,
+    )
 
     return model, history
 
@@ -115,20 +146,23 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Train roughness prediction models, run ablations, and export a predicted map."
     )
-    parser.add_argument("--epochs", type=int, default=20)
-    parser.add_argument("--batch-size", type=int, default=2)
-    parser.add_argument("--learning-rate", type=float, default=1e-3)
+    parser.add_argument("--epochs", type=int, default=80)
+    parser.add_argument("--batch-size", type=int, default=4)
+    parser.add_argument("--learning-rate", type=float, default=3e-4)
+    parser.add_argument("--weight-decay", type=float, default=1e-4)
     parser.add_argument("--image-size", type=int, default=256)
     parser.add_argument("--sample-index", type=int, default=None)
-    parser.add_argument("--sample-name", type=str, default="dirt_01")
+    parser.add_argument("--sample-name", type=str, default=None)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--no-augment", action="store_true")
     args = parser.parse_args()
 
     set_seed(args.seed)
 
     script_dir = Path(__file__).resolve().parent
     project_root = script_dir.parent
-    data_dir = project_root / "data" / "train"
+    train_data_dir = project_root / "data" / "train"
+    test_data_dir = project_root / "data" / "test"
     outputs_dir = project_root / "outputs"
     mesh_prediction_dir = (
         project_root
@@ -140,32 +174,69 @@ def main() -> None:
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Using device: {device}")
 
-    dataset = PairedTextureDataset(
-        root_dir=data_dir,
+    train_dataset = PairedTextureDataset(
+        root_dir=train_data_dir,
         image_size=(args.image_size, args.image_size),
-        random_horizontal_flip=False,
+        augment=not args.no_augment,
     )
-    dataloader = DataLoader(
-        dataset,
+    train_eval_dataset = PairedTextureDataset(
+        root_dir=train_data_dir,
+        image_size=(args.image_size, args.image_size),
+        augment=False,
+    )
+    test_dataset = PairedTextureDataset(
+        root_dir=test_data_dir,
+        image_size=(args.image_size, args.image_size),
+        augment=False,
+    )
+    train_dataloader = DataLoader(
+        train_dataset,
         batch_size=args.batch_size,
         shuffle=True,
         num_workers=0,
     )
+    train_eval_dataloader = DataLoader(
+        train_eval_dataset,
+        batch_size=args.batch_size,
+        shuffle=False,
+        num_workers=0,
+    )
+    test_dataloader = DataLoader(
+        test_dataset,
+        batch_size=args.batch_size,
+        shuffle=False,
+        num_workers=0,
+    )
 
-    print(f"Dataset size: {len(dataset)} texture pairs")
-    print("Note: metrics below are computed on the training set because no validation split exists yet.")
+    print(f"Train dataset size: {len(train_dataset)} texture pairs")
+    print(f"Test dataset size: {len(test_dataset)} texture pairs")
+    print(
+        "Augmentation: "
+        f"{'disabled' if args.no_augment else 'random crop, flips, 90-degree rotations, light albedo color jitter'}"
+    )
 
     if args.sample_index is not None:
         sample_index = args.sample_index
-    else:
-        sample_names = [sample["name"] for sample in dataset.samples]
-        if args.sample_name not in sample_names:
+        export_dataset = test_dataset
+    elif args.sample_name is not None:
+        test_sample_names = [sample["name"] for sample in test_dataset.samples]
+        train_sample_names = [sample["name"] for sample in train_eval_dataset.samples]
+        if args.sample_name in test_sample_names:
+            export_dataset = test_dataset
+            sample_index = test_sample_names.index(args.sample_name)
+        elif args.sample_name in train_sample_names:
+            export_dataset = train_eval_dataset
+            sample_index = train_sample_names.index(args.sample_name)
+        else:
+            available_samples = sorted(test_sample_names + train_sample_names)
             raise ValueError(
-                f"Sample name '{args.sample_name}' not found. Available samples: {sample_names}"
+                f"Sample name '{args.sample_name}' not found. Available samples: {available_samples}"
             )
-        sample_index = sample_names.index(args.sample_name)
+    else:
+        export_dataset = test_dataset
+        sample_index = 0
 
-    print(f"Export sample: {dataset.sample_name(sample_index)}")
+    print(f"Export sample: {export_dataset.sample_name(sample_index)}")
 
     experiments = {
         "unet_skip_connections": RoughnessUNet,
@@ -179,34 +250,42 @@ def main() -> None:
         model, history = run_experiment(
             model_name=model_name,
             model_class=model_class,
-            dataloader=dataloader,
+            train_dataloader=train_dataloader,
+            train_eval_dataloader=train_eval_dataloader,
+            test_dataloader=test_dataloader,
             device=device,
             epochs=args.epochs,
             learning_rate=args.learning_rate,
+            weight_decay=args.weight_decay,
         )
         trained_models[model_name] = model
-        ablation_results[model_name] = history[-1]
+        ablation_results[model_name] = min(history, key=lambda row: row["test_mae"])
 
     outputs_dir.mkdir(parents=True, exist_ok=True)
     metrics_path = outputs_dir / "ablation_results.json"
     metrics_path.write_text(json.dumps(ablation_results, indent=2))
+
+    checkpoint_paths = {}
+    for model_name, trained_model in trained_models.items():
+        checkpoint_paths[model_name] = outputs_dir / f"{model_name}.pth"
+        torch.save(trained_model.state_dict(), checkpoint_paths[model_name])
 
     print("\nAblation summary:")
     for model_name, metrics in ablation_results.items():
         print(
             f"{model_name}: "
             f"train_mae={metrics['train_mae']:.6f}, "
-            f"mae={metrics['mae']:.6f}, "
-            f"rmse={metrics['rmse']:.6f}, "
-            f"cosine_similarity={metrics['cosine_similarity']:.6f}"
+            f"test_mae={metrics['test_mae']:.6f}, "
+            f"test_rmse={metrics['test_rmse']:.6f}, "
+            f"test_cosine_similarity={metrics['test_cosine_similarity']:.6f}, "
+            f"best_epoch={metrics['epoch']}"
         )
 
-    best_model_name = min(ablation_results, key=lambda name: ablation_results[name]["mae"])
+    best_model_name = min(ablation_results, key=lambda name: ablation_results[name]["test_mae"])
     best_model = trained_models[best_model_name]
-    print(f"\nBest model by MAE: {best_model_name}")
+    print(f"\nBest model by test MAE: {best_model_name}")
 
-    checkpoint_path = outputs_dir / f"{best_model_name}.pth"
-    torch.save(best_model.state_dict(), checkpoint_path)
+    checkpoint_path = checkpoint_paths[best_model_name]
 
     albedo_png_path = mesh_prediction_dir / "albedo_input.png"
     target_png_path = mesh_prediction_dir / "roughness_original.png"
@@ -214,7 +293,7 @@ def main() -> None:
     preview_png_path = outputs_dir / "prediction_preview.png"
     export_prediction_artifacts(
         model=best_model,
-        dataset=dataset,
+        dataset=export_dataset,
         sample_index=sample_index,
         device=device,
         albedo_output_path=albedo_png_path,
@@ -224,7 +303,9 @@ def main() -> None:
     )
 
     print(f"Saved metrics to: {metrics_path}")
-    print(f"Saved best model checkpoint to: {checkpoint_path}")
+    for model_name, saved_checkpoint_path in checkpoint_paths.items():
+        print(f"Saved {model_name} checkpoint to: {saved_checkpoint_path}")
+    print(f"Best model checkpoint: {checkpoint_path}")
     print(f"Saved exported albedo map to: {albedo_png_path}")
     print(f"Saved original roughness map to: {target_png_path}")
     print(f"Saved predicted roughness map to: {prediction_png_path}")
